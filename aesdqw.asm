@@ -6,8 +6,7 @@
 ;;  x86_64 Intel Assembly without any external library 
 ;;  CPU: Intel Skylake ; AVX2, AES-NI
 
-;;Algorithm:
-;Random Key generation from /dev/urandom
+;Random Key generation from urandom
 ;Align key to 16bytes
 ;Align ptext,data to 16bytes
 ;Key Expansion (Round Encryption keys) : 128Bytes x 11 
@@ -38,18 +37,18 @@ section .bss
     decrypted resq 2
     
     align 16  
-    EncRKey   resq 22
+    KeyEnc   resq 22
     align 16  
-    DecRKey   resq 22
+    KeyDec   resq 22
     
     align 16  
     ptext     resq 2 
-    fd        resd 1
+    fd        resb 1
   
 section .text
 global _start
 _start:
-    ;keygen
+    ;Random keygen 
     mov rax, 318      
     lea rdi, [key]  
     mov rsi, 16           
@@ -73,14 +72,14 @@ _start:
     
     ;key expansion & key inversion
     lea rdi, [key]
-    lea rsi, [EncRKey]
-    call key_expand 
-    lea rdi, [EncRKey] 
-    lea rsi, [DecRKey]
-    call invert_roundkeys
+    lea rsi, [KeyEnc]
+    call ExpandKey 
+    lea rdi, [KeyEnc] 
+    lea rsi, [KeyDec]
+    call invertRK
   
-   ;Key load in vector registers
-   lea rdi, [EncRKey]
+  
+   lea rdi, [KeyEnc]
    movdqa xmm1,  [rdi]    
    movdqa xmm2,  [rdi + 0x10]    
    movdqa xmm3,  [rdi + 0x20]    
@@ -92,13 +91,13 @@ _start:
    movdqa xmm9,  [rdi + 0x80]   
    movdqa xmm10, [rdi + 0x90]    
    movdqa xmm11, [rdi + 0xA0]    ;11 enc xmm0-10
-   lea rdi, [DecRKey]
+   lea rdi, [KeyDec]
    movdqa xmm12, [rdi]    
    movdqa xmm13, [rdi + 0x10]    
    movdqa xmm14, [rdi + 0x20]    
    movdqa xmm15, [rdi + 0x30]    ;4 dec xmm12-15
    
- ;CACHE WARMUP ROUND : ENC
+ ;CACHE WARMUP ROUND ENC
  ;0th Round  :key Addition
  ;Rounds 1-9 :SubBytes->ShiftRows->MixColumn->AddRoundKey
  ;Last AES ENC round without MixColumn 
@@ -115,24 +114,24 @@ _start:
     aesenc  xmm0, xmm10      
     aesenclast xmm0, xmm11  
     movdqa [ctext],xmm0
-    call filewrite  
+    call FileStr  
    
-mov r10,Bench_iterations
+mov rcx,Bench_iterations
 
 ; Cache Prefetching  
 prefetchnta [ptext]
-prefetch [DecRKey]
-prefetch [DecRKey + 64]
-
+prefetch [KeyDec]
+prefetch [KeyDec + 64]
+lea rdi, [KeyDec]
 ;Serialize CPU Pipeline , Benchmarking Starts here
 lfence  
 rdtsc
 shl rdx, 32
 or rax, rdx
 mov rbx, rax     
-; xmm0-15 -> ptext : xmm0 , xmm1-11 Enc keys , xmm12-15 Dec keys , Dec keys 5-11 from DecRKey
+; xmm0-15 -> ptext : xmm0 , xmm1-11 Enc keys , xmm12-15 Dec keys , Dec keys 5-11 from KeyDec
 align 16
-AES_Bench:
+ AES_MAIN:
  movdqa xmm0,[ptext]
     pxor    xmm0, xmm1        
     aesenc  xmm0, xmm2     
@@ -156,10 +155,9 @@ AES_Bench:
     aesdec  xmm0, xmm15      
     aesdec  xmm0, xmm14      
     aesdec  xmm0, xmm13      
-    aesdeclast xmm0, xmm12   
-      
-    dec r10
-    jnz AES_Bench
+    aesdeclast xmm0, xmm12         
+    dec rcx
+    jnz AES_MAIN
  
     lfence
     rdtsc
@@ -171,55 +169,55 @@ AES_Bench:
     xor rdx, rdx
     div rbx           
     
-    call print_uint
-    call print_nl
+    call UintOut 
+    call nl
     
   mov rbx, ctext
   mov rcx, 16
-  call print_bytes
-  call print_nl
+  call BytesOut
+  call nl
   
   movdqa [decrypted], xmm0
   mov rbx, decrypted
   mov rcx, 16
-  call print_bytes
-  call print_nl
+  call BytesOut
+  call nl
   
   mov rbx, key
   mov rcx, 16
-  call print_bytes
-  call print_nl
+  call BytesOut
+  call nl
       
  mov rax, 60
  xor rdi, rdi
  syscall 
 
-key_expand: 
+ExpandKey: 
    movdqa xmm0, [rdi]
    movdqa [rsi], xmm0
     aeskeygenassist xmm2, xmm0, 0x01
-    call .expand_step
+    call expandnxt
     aeskeygenassist xmm2, xmm0, 0x02
-    call .expand_step
+    call expandnxt
     aeskeygenassist xmm2, xmm0, 0x04
-    call .expand_step
+    call expandnxt
     aeskeygenassist xmm2, xmm0, 0x08
-    call .expand_step
+    call expandnxt
     aeskeygenassist xmm2, xmm0, 0x10
-    call .expand_step
+    call expandnxt
     aeskeygenassist xmm2, xmm0, 0x20
-    call .expand_step
+    call expandnxt
     aeskeygenassist xmm2, xmm0, 0x40
-    call .expand_step
+    call expandnxt
     aeskeygenassist xmm2, xmm0, 0x80
-    call .expand_step
+    call expandnxt
     aeskeygenassist xmm2, xmm0, 0x1B
-    call .expand_step
+    call expandnxt
     aeskeygenassist xmm2, xmm0, 0x36
-    call .expand_step
+    call expandnxt
     ret
 
-.expand_step:
+expandnxt:
     pshufd xmm2, xmm2, 0xff
    movdqa xmm1, xmm0
     pslldq xmm1, 4
@@ -233,9 +231,9 @@ key_expand:
    movdqa [rsi], xmm0
     ret
 
-invert_roundkeys:
-   movdqa xmm0, [rdi + 0x00]
-   movdqa [rsi + 0x00], xmm0  
+invertRK:
+   movdqa xmm0, [rdi]
+   movdqa [rsi], xmm0  
    movdqa xmm0, [rdi + 0x10]
     aesimc xmm0, xmm0
    movdqa [rsi + 0x10], xmm0
@@ -267,7 +265,7 @@ invert_roundkeys:
    movdqa [rsi + 0xA0], xmm0
     ret
     
-print_uint:
+UintOut:
     push rbx
     push rcx
     push rdx
@@ -278,14 +276,14 @@ print_uint:
     lea rdi, [rsp + 31]
     mov byte [rdi], 0
     
-.print_loop:
+PrintL:
     xor rdx, rdx
     div rcx
     add dl, '0'
     dec rdi
     mov [rdi], dl
     test rax, rax
-    jnz .print_loop
+    jnz PrintL
 
     mov rsi, rdi
     mov rdx, rsp
@@ -301,14 +299,14 @@ print_uint:
     pop rcx
     pop rbx
     ret
-print_bytes:
+BytesOut:
     mov rax, 1
     mov rdi, 1
     mov rsi, rbx
     mov rdx, rcx
     syscall
     ret
-print_nl:
+nl:
     push 10
     mov rax, 1
     mov rdi, 1
@@ -318,7 +316,7 @@ print_nl:
     add rsp, 8 
     ret
     
-filewrite:
+FileStr:
     push rdi
     mov rax, 2           
     lea rdi, [op]
